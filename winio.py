@@ -34,6 +34,8 @@ def client_origin(h):
 
 def capture(h):
     """Return BGR numpy image of the client area."""
+    if win32gui.IsIconic(h):  # a minimized window has a 0x0 client area
+        win32gui.ShowWindow(h, win32con.SW_SHOWNOACTIVATE); time.sleep(0.5)
     _, _, w, hh = win32gui.GetClientRect(h)
     hdc = win32gui.GetDC(h); mdc = win32ui.CreateDCFromHandle(hdc); sdc = mdc.CreateCompatibleDC()
     bmp = win32ui.CreateBitmap(); bmp.CreateCompatibleBitmap(mdc, w, hh); sdc.SelectObject(bmp)

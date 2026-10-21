@@ -2,8 +2,9 @@
 
 Each step:
   1. send the screenshot and ask a `choice`: click (menus / buttons) or drag (gameplay)
-  2. click -> ask one `box`: a 10x10 px box where to click, then click its centre
-     drag  -> ask two `box`es: where to press and where to release, then drag between their centres
+  2. click -> ask one `box` around the button to click, then click its centre
+     drag  -> ask a `box` around the loaded blob to throw (press), then send the screenshot with that blob
+              outlined in white and ask a `box` around the blob to hit (release); drag between the centres
 
 Needs OPENROUTER_API_KEY in .env; optional DECISION_MODEL (default jev-latest).
 
@@ -39,9 +40,6 @@ def box_center(ans, w, h):
     b = ans['box']
     return int((b['left'] + b['right']) / 2 * w), int((b['top'] + b['bottom']) / 2 * h)
 
-def box_q(what, w, h):
-    return {'type': 'box', 'instructions': f'In the screenshot ({w}x{h} px), draw a 10px by 10px box centred on {what}.'}
-
 def annotate(img, boxes, label):
     """Draw the model's boxes (name -> answer), their centres, and the drag arrow."""
     out = img.copy(); H, W = img.shape[:2]
@@ -69,12 +67,11 @@ def main():
         play(h, a, out, log)
 
 def play(h, a, out, log):
-    history = []
     for step in range(a.steps):
         if winio.in_corner(): print('mouse in corner - stopping'); break
         if not winio.is_open(h): print('game window closed - stopping'); break
         img = winio.capture(h); H, W = img.shape[:2]
-        state = [GAME.format(w=W, h=H), 'Recent actions: ' + ('; '.join(history[-5:]) or 'none yet')]
+        state = [GAME.format(w=W, h=H)]
 
         t = time.time()
         r1 = ask(state, {'action': {'type': 'choice',
@@ -83,29 +80,44 @@ def play(h, a, out, log):
                          'drag': 'The game board is showing with a loaded blob at the top: drag to throw it.'}}}, img)
         act = r1['answers']['action']
         if act['choice'] == 'click':
-            r2 = ask(state + ['You decided to click.'],
-                     {'target': box_q('the spot you want to click (e.g. the button that starts or continues the game)', W, H)}, img)
-            pts = [box_center(r2['answers']['target'], W, H)]
+            rs = [ask(state + ['You decided to click.'],
+                      {'target': {'type': 'box', 'instructions':
+                          f'In the screenshot ({W}x{H} px), draw a box tightly around the button you want to click '
+                          '(e.g. the one that starts or continues the game).'}}, img)]
         else:
-            r2 = ask(state + ['You decided to drag: press on a loaded blob, then release on the spot you want to hit.'],
-                     {'press': box_q('the loaded blob at the top of the board that you want to throw (where to press)', W, H),
-                      'release': box_q('the spot you want to aim at: put this box directly on the target, e.g. a blob '
-                                       'down on the board with the same colour and number as the blob you throw. The '
-                                       'drag ends here and the blob flies toward it', W, H)}, img)
-            pts = [box_center(r2['answers']['press'], W, H), box_center(r2['answers']['release'], W, H)]
+            # two calls: pick the blob to throw, then show it boxed on the screenshot and ask where to throw it
+            rp = ask(state + ['You decided to drag: first pick the loaded blob to throw.'],
+                     {'press': {'type': 'box', 'instructions':
+                          f'In the screenshot ({W}x{H} px), draw a box tightly around the blob you want to throw: one '
+                          'loaded blob in the row at the top of the board. Pick one that has a blob with the same colour '
+                          'and number down on the board, if any does. The drag starts at the centre of this box.'}}, img)
+            b = rp['answers']['press']['box']
+            marked = img.copy()
+            cv2.rectangle(marked, (int(b['left'] * W), int(b['top'] * H)), (int(b['right'] * W), int(b['bottom'] * H)),
+                          (255, 255, 255), 3)
+            rr = ask(state + ['You are throwing the blob inside the white box at the top of the screenshot. '
+                              'Look at its colour and number, then pick where to throw it.'],
+                     {'release': {'type': 'box', 'instructions':
+                          f'In the screenshot ({W}x{H} px), draw a box tightly around the target blob: one blob that is '
+                          'already down on the board (below the top row) with the same colour and number as the blob in '
+                          'the white box. If none matches, pick the board blob closest in number to it. Do not pick a '
+                          'blob in the top row or empty space. The drag ends at the centre of this box and the thrown '
+                          'blob flies toward it.'}}, marked)
+            rs = [rp, rr]
+        answers = {k: v for r in rs for k, v in r['answers'].items()}
+        pts = [box_center(answers[k], W, H) for k in ('target', 'press', 'release') if k in answers]
         dt = time.time() - t
         desc = f"{act['choice']} {' -> '.join(map(str, pts))}"
         print(f"step {step}: {desc} (choice conf {act.get('confidence')}, "
-              f"box conf {[v.get('confidence') for v in r2['answers'].values()]}, {dt:.2f}s)")
-        log.write(json.dumps({'t': time.time(), 'r1': r1, 'r2': r2, 'pts': pts}) + '\n'); log.flush()
+              f"box conf {[v.get('confidence') for v in answers.values()]}, {dt:.2f}s)")
+        log.write(json.dumps({'t': time.time(), 'r1': r1, 'r2': rs, 'pts': pts}) + '\n'); log.flush()
         cv2.imwrite(f'{out}/step_{step:04d}.png',
-                    annotate(img, r2['answers'], f"step {step}: {desc} (choice {act['choice']} conf {act.get('confidence')})"))
+                    annotate(img, answers, f"step {step}: {desc} (choice {act['choice']} conf {act.get('confidence')})"))
         if a.dry_run: break
 
         winio.wait_for_idle_mouse()
         done = winio.click(h, *pts[0]) if len(pts) == 1 else winio.drag(h, *pts[0], *pts[1])
         if not done: print('could not focus game window, retrying'); time.sleep(2); continue
-        history.append(f'{desc} at step {step}')
         time.sleep(a.settle)
 
 if __name__ == '__main__':
